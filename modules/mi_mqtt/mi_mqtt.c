@@ -37,6 +37,8 @@
 /* module functions */
 static int mod_init();
 static void destroy(void);
+static void mqtt_process(int);
+
 
 /* formated JSON response printing, disabled by default */
 int pretty_print;
@@ -49,12 +51,12 @@ MQTTAsync client;
 //static str backend = str_init("json");
 static str topic_base = str_init("commands/");
 static str broadcast_topic = str_init("allopensips");
-static str mqtt_clientid = str_init("OpensipsMQTT");
 static char *command_topic_s;
 static str mqtt_uri = str_init("tcp://test.mosquitto.org:1883");
 
-char *mqtt_user_s;
-char *mqtt_pass_s;
+static char *mqtt_clientid_s;
+static char *mqtt_user_s;
+static char *mqtt_pass_s;
 char hostname[MAXHOSTNAMELEN];
 
 /* MQTT Callbacks */
@@ -70,18 +72,18 @@ static const param_export_t mi_params[] = {
         {"broadcast_topic", STR_PARAM, &broadcast_topic.s },
 	{"command_topic",   STR_PARAM, &command_topic_s },
         {"mqtt_uri",        STR_PARAM, &mqtt_uri.s  },
-	{"mqtt_clientid",   STR_PARAM, &mqtt_clientid.s },
+	{"mqtt_clientid",   STR_PARAM, &mqtt_clientid_s },
 	{"mqtt_user",       STR_PARAM, &mqtt_user_s },
 	{"mqtt_password",   STR_PARAM, &mqtt_pass_s },
         {0,0,0}
 };
-/*
+
 static const proc_export_t mi_procs[] = {
-        {"MIMQTT",  0,  0, mqtt_proc, 1,
+        {"MIMQTT",  0,  0, mqtt_process, 1,
                 PROC_FLAG_INITCHILD|PROC_FLAG_HAS_IPC|PROC_FLAG_NEEDS_SCRIPT },
         {NULL, 0, 0, NULL, 0, 0}
 };
-*/
+
 
 
 /* module exports */
@@ -99,7 +101,7 @@ struct module_exports exports = {
         NULL,                                           /* exported MI functions */
         NULL,                                           /* exported PV */
         NULL,                                           /* exported transformations */
-        NULL,                                                      /* extra processes */
+        mi_procs,                                                      /* extra processes */
         0,                                                      /* module pre-initialization function */
         mod_init,                                       /* module initialization function */
         (response_function) 0,          /* response handling function */
@@ -114,6 +116,7 @@ static int msgarrvd(void *context, char *topicName, int topicLen, MQTTAsync_mess
   const char **parse_end = NULL;
   mi_request_t request;
   mi_response_t *response = NULL;
+  struct mi_handler *async_hdl;
   struct mi_cmd *cmd = NULL;
   str outmsg;
   char *req_method = NULL;
@@ -130,7 +133,12 @@ static int msgarrvd(void *context, char *topicName, int topicLen, MQTTAsync_mess
       cmd = lookup_mi_cmd(req_method, strlen(req_method));
     
     if (cmd) { 
-      response = handle_mi_request(&request, cmd, 0);
+      response = handle_mi_request(&request, cmd, async_hdl);
+    }
+
+    if (response == MI_ASYNC_RPL) {
+		LM_DBG("got an async reply\n");
+		//		response = mi_json_wait_async_reply(async_hdl);
     }
     
     if (response == NULL) {
@@ -158,7 +166,7 @@ static void connlost(void *context, char *cause) {
 
 }
 
-void onSubscribe(void* context, MQTTAsync_successData* response)
+static void onSubscribe(void* context, MQTTAsync_successData* response)
 {
 	LM_DBG("Subscribe succeeded\n");
 }
@@ -171,9 +179,10 @@ static void onConnect(void* context, MQTTAsync_successData* response)
 	int rc;
 	char topic[128];
 	char hostname[MAXHOSTNAMELEN];
-	
 
-	opts.onSuccess = onSubscribe;
+	LM_DBG("Connected to MQTT server\n");
+
+	//opts.onSuccess = onSubscribe;
 	opts.context = client;
 	// Subscribe to the broadcast channel
 	sprintf(topic,"%s%s",topic_base.s,broadcast_topic.s);
@@ -201,27 +210,52 @@ static void onConnect(void* context, MQTTAsync_successData* response)
 
 void onConnectFailure(void* context, MQTTAsync_failureData* response)
 {
-	LM_ERR("MQTT Connect failed, rc %d\n", response->code);
+  LM_ERR("MQTT Connect failed, rc %d: %s\n", response->code, response->message);
 }
 
+
 static int mod_init(void) {
+  
+
+  LM_DBG("Calling mod_init\n");
+
+  if (mqtt_clientid_s == NULL) {
+    mqtt_clientid_s = pkg_malloc(MAXHOSTNAMELEN+1);
+    gethostname(mqtt_clientid_s,sizeof(mqtt_clientid_s));
+    LM_DBG("No client ID specified.  Setting to hostname of %s\n",mqtt_clientid_s);
+  } else {
+    LM_DBG("Using client ID %s\n",mqtt_clientid_s);
+  }
+  
+
+  return 0;
+
+}
+
+static void mqtt_process(int rank) {
 
   MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer;
   int rc;
 
+  LM_DBG("new MQTT process with pid = %d created\n",getpid());
 
-  LM_DBG("Calling mod_init\n");
+  if( init_mi_child()!=0) {
+    LM_CRIT("failed to init the mi process\n");
+    exit(-1);
+  }
 
-  if ((rc = MQTTAsync_create(&client, mqtt_uri.s, mqtt_clientid.s,			      MQTTCLIENT_PERSISTENCE_NONE, NULL)) != MQTTASYNC_SUCCESS) {
+
+  if ((rc = MQTTAsync_create(&client, mqtt_uri.s, mqtt_clientid_s,			      MQTTCLIENT_PERSISTENCE_NONE, NULL)) != MQTTASYNC_SUCCESS) {
     LM_ERR("Failed to create MQTT client, return code %d\n", rc);
-    return -1;
+    exit(-1);
   }
 
   if ((rc = MQTTAsync_setCallbacks(client, client, connlost, msgarrvd, NULL)) != MQTTASYNC_SUCCESS) {
     
     LM_ERR("Failed to set MQTT client callbacks, return code %d\n", rc);
     destroy();
-    return -1;
+    exit(-1);
+
   }
 
   conn_opts.keepAliveInterval = 20;
@@ -229,14 +263,35 @@ static int mod_init(void) {
   conn_opts.onSuccess = onConnect;
   conn_opts.onFailure = onConnectFailure;
   conn_opts.context = client;
+
+  if (mqtt_user_s) {
+    conn_opts.username = mqtt_user_s;
+    LM_DBG("MQTT Using a useraccount %s\n",conn_opts.username);
+
+  }
+  if (mqtt_pass_s) {
+    conn_opts.password = mqtt_pass_s;
+    LM_DBG("MQTT Using a password %s\n",conn_opts.password);
+
+  }
+
+
   
   if ((rc = MQTTAsync_connect(client, &conn_opts)) != MQTTASYNC_SUCCESS) {
     LM_ERR("Failed to connect to MQTT server, return code %d\n", rc);
     destroy();
-    return -1;
+    exit(-1);
+  } else {
+    LM_DBG("Connecting to %s.....\n",mqtt_uri.s);
   }
+
+  while(1) {
+    usleep(10000L);
+  }
+
+  LM_DBG("SHIT!\n");
  
-  return 0;
+  return ;
 
 }
 
@@ -245,4 +300,5 @@ static void destroy(void)
 {
   LM_DBG("calling destroy for mi_mqtt\n");
   MQTTAsync_destroy(&client);
+  pkg_free(mqtt_clientid_s);
 }
