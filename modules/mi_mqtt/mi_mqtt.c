@@ -194,7 +194,7 @@ static void onConnect(void* context, MQTTAsync_successData5* response)
 	MQTTAsync_responseOptions opts = MQTTAsync_responseOptions_initializer;
 	int rc;
 	char topic[128];
-	char hostname[MAXHOSTNAMELEN];
+	char hostname[128];
 
 	LM_DBG("Connected to MQTT server\n");
 
@@ -210,7 +210,7 @@ static void onConnect(void* context, MQTTAsync_successData5* response)
 
 	// Subscribe to the instance specific command channel
 	if ( !command_topic_s ) {
-	  gethostname(hostname,sizeof(hostname));
+	  gethostname(hostname,128);
 	  LM_DBG("MQTT Instance Specific channel not specified.  Defaulting to hostname %s\n",hostname);
 	  sprintf(topic,"%s%s",topic_base.s,hostname);
 	} else {
