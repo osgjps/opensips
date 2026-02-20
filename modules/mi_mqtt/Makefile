@@ -5,6 +5,6 @@ auto_gen=
 NAME=mi_mqtt.so
 
 DEFS +=-I$(LOCALBASE)/include
-LIBS +=-L$(LOCALBASE)/lib -lpaho-mqtt3as
+LIBS +=-L$(LOCALBASE)/lib -lpaho-mqtt3as -luuid
 
 include ../../Makefile.modules

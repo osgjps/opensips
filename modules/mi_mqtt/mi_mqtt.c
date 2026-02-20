@@ -32,6 +32,7 @@
 #include "../../mi/mi_trace.h"
 
 #include "MQTTAsync.h"
+#include <uuid/uuid.h>
 
 
 /* module functions */
@@ -231,18 +232,19 @@ void onConnectFailure(void* context, MQTTAsync_failureData5* response)
 
 
 static int mod_init(void) {
-  
+
 
   LM_DBG("Calling mod_init\n");
 
   if (mqtt_clientid_s == NULL) {
-    mqtt_clientid_s = pkg_malloc(MAXHOSTNAMELEN+1);
-    gethostname(mqtt_clientid_s,sizeof(mqtt_clientid_s));
-    LM_DBG("No client ID specified.  Setting to hostname of %s\n",mqtt_clientid_s);
+    uuid_t uuid_obj;  
+    mqtt_clientid_s = pkg_malloc(37 * sizeof(char));
+    uuid_generate_random(uuid_obj);
+    uuid_unparse(uuid_obj, mqtt_clientid_s);
+    LM_DBG("No client ID specified.  Generating a random UUID one: %s.\n", mqtt_clientid_s);
   } else {
     LM_DBG("Using client ID %s\n",mqtt_clientid_s);
   }
-  
 
   return 0;
 
