@@ -120,20 +120,35 @@ static int msgarrvd(void *context, char *topicName, int topicLen, MQTTAsync_mess
   struct mi_cmd *cmd = NULL;
   str outmsg;
   char *req_method = NULL;
+  MQTTProperty *responseprop;
+  MQTTProperty *correlationprop;
+  int rc;
   
   LM_DBG("MQTT Message received - Topic: %s   Message: %.*s\n",topicName,message->payloadlen, (char*)message->payload);
 
+  if (MQTTProperties_hasProperty(&message->properties, MQTTPROPERTY_CODE_RESPONSE_TOPIC))
+    responseprop = MQTTProperties_getProperty(&message->properties, MQTTPROPERTY_CODE_RESPONSE_TOPIC);
+  if (MQTTProperties_hasProperty(&message->properties, MQTTPROPERTY_CODE_CORRELATION_DATA))
+    correlationprop = MQTTProperties_getProperty(&message->properties, MQTTPROPERTY_CODE_CORRELATION_DATA);
+
+  
   memset(&request,0,sizeof(request));
   if (parse_mi_request((char*)message->payload, parse_end, &request) < 0) {
     LM_ERR("cannot parse command: %.*s\n", message->payloadlen, (char*)message->payload);
   } else {
 
     req_method = mi_get_req_method(&request);
+    LM_DBG("got MI command=%s\n", req_method);
     if (req_method)
       cmd = lookup_mi_cmd(req_method, strlen(req_method));
+
+    if (cmd && cmd->flags & MI_ASYNC_RPL_FLAG) {
+      LM_DBG("command=%s is async\n", req_method);
+    }
+
     
     if (cmd) { 
-      response = handle_mi_request(&request, cmd, async_hdl);
+      response = handle_mi_request(&request, cmd, NULL);
     }
 
     if (response == MI_ASYNC_RPL) {
@@ -144,9 +159,10 @@ static int msgarrvd(void *context, char *topicName, int topicLen, MQTTAsync_mess
     if (response == NULL) {
       LM_ERR("failed to build response!\n");
     } else {
-      outmsg.s = pkg_malloc(256);
-      outmsg.len = 256;
-      print_mi_response(response, request.id, &outmsg, 1);
+      outmsg.s = pkg_malloc(256*256);
+      outmsg.len = 256*256;
+      rc = print_mi_response(response, request.id, &outmsg, 1);
+      LM_DBG("print_mi_response returned %i\n",rc);
       LM_DBG("MQTT MI response: %.*s\n",outmsg.len,outmsg.s);
       free_mi_response(response);
       pkg_free(outmsg.s);
@@ -166,13 +182,13 @@ static void connlost(void *context, char *cause) {
 
 }
 
-static void onSubscribe(void* context, MQTTAsync_successData* response)
+static void onSubscribe(void* context, MQTTAsync_successData5* response)
 {
 	LM_DBG("Subscribe succeeded\n");
 }
 
 
-static void onConnect(void* context, MQTTAsync_successData* response)
+static void onConnect(void* context, MQTTAsync_successData5* response)
 {
 	MQTTAsync client = (MQTTAsync)context;
 	MQTTAsync_responseOptions opts = MQTTAsync_responseOptions_initializer;
@@ -182,7 +198,7 @@ static void onConnect(void* context, MQTTAsync_successData* response)
 
 	LM_DBG("Connected to MQTT server\n");
 
-	//opts.onSuccess = onSubscribe;
+	opts.onSuccess5 = onSubscribe;
 	opts.context = client;
 	// Subscribe to the broadcast channel
 	sprintf(topic,"%s%s",topic_base.s,broadcast_topic.s);
@@ -208,7 +224,7 @@ static void onConnect(void* context, MQTTAsync_successData* response)
 
 }
 
-void onConnectFailure(void* context, MQTTAsync_failureData* response)
+void onConnectFailure(void* context, MQTTAsync_failureData5* response)
 {
   LM_ERR("MQTT Connect failed, rc %d: %s\n", response->code, response->message);
 }
@@ -234,7 +250,7 @@ static int mod_init(void) {
 
 static void mqtt_process(int rank) {
 
-  MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer;
+  MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer5;
   int rc;
 
   LM_DBG("new MQTT process with pid = %d created\n",getpid());
@@ -245,7 +261,11 @@ static void mqtt_process(int rank) {
   }
 
 
-  if ((rc = MQTTAsync_create(&client, mqtt_uri.s, mqtt_clientid_s,			      MQTTCLIENT_PERSISTENCE_NONE, NULL)) != MQTTASYNC_SUCCESS) {
+
+  MQTTAsync_createOptions crea_opts = MQTTAsync_createOptions_initializer5;
+  
+  
+  if ((rc = MQTTAsync_createWithOptions(&client, mqtt_uri.s, mqtt_clientid_s, MQTTCLIENT_PERSISTENCE_NONE, NULL, &crea_opts)) != MQTTASYNC_SUCCESS) {
     LM_ERR("Failed to create MQTT client, return code %d\n", rc);
     exit(-1);
   }
@@ -259,10 +279,10 @@ static void mqtt_process(int rank) {
   }
 
   conn_opts.keepAliveInterval = 20;
-  conn_opts.cleansession = 1;
-  conn_opts.onSuccess = onConnect;
-  conn_opts.onFailure = onConnectFailure;
+  conn_opts.onSuccess5 = onConnect;
+  conn_opts.onFailure5 = onConnectFailure;
   conn_opts.context = client;
+
 
   if (mqtt_user_s) {
     conn_opts.username = mqtt_user_s;
@@ -289,8 +309,6 @@ static void mqtt_process(int rank) {
     usleep(10000L);
   }
 
-  LM_DBG("SHIT!\n");
- 
   return ;
 
 }
@@ -300,5 +318,4 @@ static void destroy(void)
 {
   LM_DBG("calling destroy for mi_mqtt\n");
   MQTTAsync_destroy(&client);
-  pkg_free(mqtt_clientid_s);
 }
