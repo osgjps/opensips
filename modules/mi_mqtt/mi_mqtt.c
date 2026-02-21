@@ -63,6 +63,9 @@ char hostname[MAXHOSTNAMELEN];
 /* MQTT Callbacks */
 static int msgarrvd(void *, char *, int, MQTTAsync_message *);
 static void connlost(void *, char *);
+static void doSubscribe(void* , char*);
+
+static int doshutdown = 0;
 
 
 
@@ -179,7 +182,17 @@ static int msgarrvd(void *context, char *topicName, int topicLen, MQTTAsync_mess
  
 static void connlost(void *context, char *cause) {
 
-  LM_ERR("MQTT Connection Lost - Cause: %s\n",cause);
+  int rc;
+  LM_ERR("MQTT Connection Lost - Caggguse: %s   %p\n",cause, context);
+  MQTTAsync client = (MQTTAsync)context;
+  sleep(5);
+  MQTTAsync_setConnected(client, client, doSubscribe); 
+  rc = MQTTAsync_reconnect(client);
+  if (rc != MQTTASYNC_SUCCESS) {
+    LM_ERR("Reconnect failure\n");
+  } else {
+    LM_DBG("Reconnect success?\n");
+  }
 
 }
 
@@ -188,9 +201,20 @@ static void onSubscribe(void* context, MQTTAsync_successData5* response)
 	LM_DBG("Subscribe succeeded\n");
 }
 
+static void onFailure(void* context, MQTTAsync_failureData5* response)
+{
+  LM_DBG("Subscribe failed. RC %i Message %s\n",response->reasonCode, response->message);
+}
+
 
 static void onConnect(void* context, MQTTAsync_successData5* response)
 {
+
+  doSubscribe(context, "connect");
+
+}
+
+static void doSubscribe(void* context, char* cause) {
 	MQTTAsync client = (MQTTAsync)context;
 	MQTTAsync_responseOptions opts = MQTTAsync_responseOptions_initializer;
 	int rc;
@@ -198,8 +222,12 @@ static void onConnect(void* context, MQTTAsync_successData5* response)
 	char hostname[128];
 
 	LM_DBG("Connected to MQTT server\n");
+	if (client == NULL) {
+	  LM_ERR("SHITBALLS\n");
+	}
 
 	opts.onSuccess5 = onSubscribe;
+	opts.onFailure5 = onFailure;
 	opts.context = client;
 	// Subscribe to the broadcast channel
 	sprintf(topic,"%s%s",topic_base.s,broadcast_topic.s);
@@ -284,6 +312,8 @@ static void mqtt_process(int rank) {
   conn_opts.onSuccess5 = onConnect;
   conn_opts.onFailure5 = onConnectFailure;
   conn_opts.context = client;
+  conn_opts.automaticReconnect = 1;
+  conn_opts.cleansession = 0;
 
 
   if (mqtt_user_s) {
@@ -297,7 +327,7 @@ static void mqtt_process(int rank) {
 
   }
 
-
+  //MQTTAsync_setConnected(client, client, doSubscribe); 
   
   if ((rc = MQTTAsync_connect(client, &conn_opts)) != MQTTASYNC_SUCCESS) {
     LM_ERR("Failed to connect to MQTT server, return code %d\n", rc);
@@ -307,9 +337,10 @@ static void mqtt_process(int rank) {
     LM_DBG("Connecting to %s.....\n",mqtt_uri.s);
   }
 
-  while(1) {
-    usleep(10000L);
+  while(!doshutdown) {
+    usleep(1000L);
   }
+  LM_DBG("Shutting down mqtt thread\n");
 
   return ;
 
@@ -319,5 +350,8 @@ static void mqtt_process(int rank) {
 static void destroy(void)
 {
   LM_DBG("calling destroy for mi_mqtt\n");
+  MQTTAsync_disconnectOptions disc_opts = MQTTAsync_disconnectOptions_initializer;
+  MQTTAsync_disconnect(client, &disc_opts);
   MQTTAsync_destroy(&client);
+  doshutdown = 1;
 }
